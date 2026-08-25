@@ -1,0 +1,21 @@
+# This project is meant to run inside the existing CUDA-enabled venv at:
+#   C:\Users\QBS PC\PycharmProjects\ais-handler-template\.venv
+# That venv already has: torch, torchvision (CUDA build), ultralytics,
+# opencv-python, numpy, pillow.
+#
+# Installed specifically for this project (auto-labeling pipeline +
+# vendored YOLOX / NanoDet training code under external/):
+pycocotools>=2.0.2
+loguru
+thop
+tabulate
+pyaml
+torchmetrics
+termcolor
+Cython
+imagesize
+pytorch-lightning
+mmengine  # pure-Python only, needed to unpickle official RTMDet .pth checkpoint metadata
+
+# Install with:
+#   "C:\Users\QBS PC\PycharmProjects\ais-handler-template\.venv\Scripts\python.exe" -m pip install -r requirements.txt

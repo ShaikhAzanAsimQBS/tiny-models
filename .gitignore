@@ -1,0 +1,21 @@
+# Generated data / weights - large and reproducible via pipeline.py / training scripts
+extracted_frames/
+datasets/
+runs/
+pretrained/
+models/*.pt
+!models/.gitkeep
+input_vid/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# YOLOX run artifacts if generated inside the vendored repo by mistake
+external/YOLOX/YOLOX_outputs/
+external/YOLOX/*.pth
+
+# misc
+*.log
+.DS_Store
