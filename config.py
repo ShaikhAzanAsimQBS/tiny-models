@@ -29,7 +29,7 @@ VENV_PYTHON = r"C:\Users\QBS PC\PycharmProjects\ais-handler-template\.venv\Scrip
 #   - a single video file, e.g. r"C:\data\shelf_walkthrough.mp4"
 #   - a folder containing any mix of images and videos (searched recursively),
 #     e.g. r"C:\data\raw_media"
-INPUT_PATH = r"C:\Users\QBS PC\PycharmProjects\dataset_creator\input_vid\vid1.mp4"
+INPUT_PATH = r"C:\Users\QBS PC\Downloads\images\images"
 
 # When a video is processed (INPUT_PATH itself, or a video found while
 # walking a folder), only every Nth decoded frame is kept/labeled.
@@ -113,7 +113,7 @@ MOBILENET_SSD_SCORE_THRESH = 0.35  # inference score threshold baked into the ex
 YOLOX_REPO_DIR = os.path.join(PROJECT_ROOT, "external", "YOLOX")
 YOLOX_EXPERIMENT_NAME = "yolox_tiny_product"
 YOLOX_OUTPUT_DIR = os.path.join(RUNS_ROOT, "yolox_tiny")
-YOLOX_MAX_EPOCH = 45
+YOLOX_MAX_EPOCH = 50
 YOLOX_BATCH_SIZE = 16
 YOLOX_INPUT_SIZE = (416, 416)  # (height, width), must be multiples of 32
 YOLOX_TEST_SIZE = (416, 416)
@@ -128,7 +128,13 @@ YOLOX_PRETRAINED_CKPT = os.path.join(PROJECT_ROOT, "pretrained", "yolox_tiny.pth
 YOLOX_PRETRAINED_CKPT_URL = "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.pth"
 YOLOX_AUTO_DOWNLOAD_PRETRAINED = True
 YOLOX_FP16 = False
-YOLOX_RESUME = False
+# If True, continues an interrupted run instead of starting fresh from the
+# pretrained COCO checkpoint: restores model + optimizer + epoch/best-AP
+# state from this experiment's own "latest_ckpt.pth" (auto-saved after every
+# epoch under YOLOX_OUTPUT_DIR/YOLOX_EXPERIMENT_NAME) and continues training
+# up to YOLOX_MAX_EPOCH. Set back to False once you want to start a new run
+# from the pretrained weights again.
+YOLOX_RESUME = True
 YOLOX_OCCUPY_GPU = False
 YOLOX_CACHE_IMGS = None  # None, "ram" or "disk"
 
@@ -137,7 +143,7 @@ NANODET_REPO_DIR = os.path.join(PROJECT_ROOT, "external", "nanodet")
 NANODET_OUTPUT_DIR = os.path.join(RUNS_ROOT, "nanodet")
 NANODET_INPUT_SIZE = (320, 320)  # (width, height)
 NANODET_MODEL_SIZE = "1.0x"  # ShuffleNetV2 width multiplier: 0.5x / 1.0x / 1.5x / 2.0x
-NANODET_EPOCHS = 100
+NANODET_EPOCHS = 50
 NANODET_BATCH_SIZE = 16
 NANODET_LEARNING_RATE = 0.001
 NANODET_WEIGHT_DECAY = 0.05
@@ -163,7 +169,7 @@ NANODET_LOG_INTERVAL = 10
 RTMDET_VARIANT = "tiny"  # "tiny" (4.8M, fastest) / "s" / "l" also implemented
 RTMDET_OUTPUT_DIR = os.path.join(RUNS_ROOT, "rtmdet_tiny")
 RTMDET_INPUT_SIZE = (640, 640)  # (height, width), official RTMDet training/eval resolution
-RTMDET_EPOCHS = 100
+RTMDET_EPOCHS = 50
 RTMDET_BATCH_SIZE = 16
 RTMDET_LEARNING_RATE = 0.001
 RTMDET_WEIGHT_DECAY = 0.05

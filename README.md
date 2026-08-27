@@ -141,6 +141,15 @@ downloads the official COCO-pretrained `yolox_tiny.pth` on first run
 a CUDA GPU** (YOLOX's `Trainer` is GPU-only). Checkpoints saved to
 `runs/yolox_tiny/yolox_tiny_product/`.
 
+**Pausing/resuming a run:** a `latest_ckpt.pth` (model + optimizer +
+epoch/best-AP state) is written after *every* epoch, so it's always safe to
+stop training early (e.g. `Ctrl+C`) — nothing is lost beyond the epoch in
+progress. To continue later where you left off (e.g. you stopped after
+epoch 15 and now want to train the remaining epochs up to
+`YOLOX_MAX_EPOCH`), set `YOLOX_RESUME = True` in `config.py` and re-run the
+same script; it resumes from `latest_ckpt.pth` instead of restarting from
+the pretrained COCO weights. Set it back to `False` for a fresh run.
+
 ### NanoDet-Plus — `training/train_nanodet.py`
 Drives the official [RangiLyu/nanodet](https://github.com/RangiLyu/nanodet)
 model/dataset code, vendored under `external/nanodet/`. NanoDet's own

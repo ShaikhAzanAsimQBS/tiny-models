@@ -316,7 +316,11 @@ class Trainer:
             else:
                 ckpt_file = self.args.ckpt
 
-            ckpt = torch.load(ckpt_file, map_location=self.device)
+            # weights_only=False: PyTorch 2.6+ defaults to True, which rejects
+            # the numpy scalar globals (best_ap/curr_ap) this trainer itself
+            # pickles into its checkpoints. Safe here since this loads our
+            # own previously-saved checkpoint.
+            ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)
             # resume the model/optimizer state dict
             model.load_state_dict(ckpt["model"])
             self.optimizer.load_state_dict(ckpt["optimizer"])
@@ -337,7 +341,7 @@ class Trainer:
             if self.args.ckpt is not None:
                 logger.info("loading checkpoint for fine tuning")
                 ckpt_file = self.args.ckpt
-                ckpt = torch.load(ckpt_file, map_location=self.device)["model"]
+                ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)["model"]
                 model = load_ckpt(model, ckpt)
             self.start_epoch = 0
 

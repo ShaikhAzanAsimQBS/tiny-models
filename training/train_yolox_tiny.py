@@ -82,6 +82,13 @@ def ensure_pretrained_checkpoint() -> str:
         return None
 
 
+def resume_checkpoint_path(exp) -> str:
+    """Path to the "latest_ckpt.pth" that YOLOX's Trainer auto-saves after
+    every epoch (model + optimizer + start_epoch + best_ap), used to
+    continue an interrupted run via YOLOX_RESUME=True."""
+    return os.path.join(exp.output_dir, exp.exp_name, "latest_ckpt.pth")
+
+
 def main():
     if not torch.cuda.is_available():
         raise RuntimeError(
@@ -94,7 +101,20 @@ def main():
     exp = build_exp()
     exp.seed = config.TRAIN_RANDOM_SEED
 
-    ckpt_path = ensure_pretrained_checkpoint()
+    if config.YOLOX_RESUME:
+        # Continue a previously interrupted run: load model + optimizer +
+        # epoch/best-AP state from this experiment's own latest checkpoint,
+        # NOT the official pretrained weights (those don't contain
+        # optimizer/epoch state and would restart from epoch 0).
+        ckpt_path = resume_checkpoint_path(exp)
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(
+                f"YOLOX_RESUME is True but no checkpoint was found at {ckpt_path}. "
+                f"Run a first training pass (with YOLOX_RESUME=False) before resuming."
+            )
+        logger.info(f"[train_yolox_tiny] YOLOX_RESUME=True -> resuming from {ckpt_path}")
+    else:
+        ckpt_path = ensure_pretrained_checkpoint()
 
     args = SimpleNamespace(
         experiment_name=exp.exp_name,
