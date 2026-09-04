@@ -1,13 +1,17 @@
 # dataset_creator
 
 Turns raw video/images into training data for four lightweight detectors,
-using a fine-tuned YOLO11n model as an auto-labeling "teacher":
+using a two-stage auto-labeling "teacher": a stock YOLO11x finds every
+**person**, then a fine-tuned face11n runs on a crop of each person box to
+find **faces**:
 
 ```
 video or folder of images/videos
         |
         v
-  [pipeline.py]  --(YOLO11n: general_product_detection.pt)-->  per-image "product" boxes
+  [pipeline.py]
+        |--(stage A: yolo11x.pt, stock COCO weights)--> "person" boxes on the full image
+        |--(stage B: face11n.pt, fine-tuned)-----------> "face" boxes on a crop of each person box
         |
         +--> datasets/mobilenet_ssd/  (Pascal VOC layout)
         +--> datasets/nanodet/        (Pascal VOC layout)
@@ -47,15 +51,14 @@ training code were installed into it (see [`requirements.txt`](requirements.txt)
 "C:\Users\QBS PC\PycharmProjects\ais-handler-template\.venv\Scripts\python.exe" -m pip install -r requirements.txt
 ```
 
-## 1. Put the teacher model in place
-
-Copy your fine-tuned single-class ("product") YOLO11n weights to:
+## 1. Put the two teacher models in place
 
 ```
-models/general_product_detection.pt
+models/yolo11x.pt   # stock, COCO-pretrained Ultralytics YOLO11x - only its "person" class is used
+models/face11n.pt   # your fine-tuned, 1-class ("face") YOLO11n
 ```
 
-(`config.YOLO_MODEL_PATH` points here by default.)
+(`config.PERSON_MODEL_PATH` / `config.FACE_MODEL_PATH` point here by default.)
 
 ## 2. Configure `config.py`
 
@@ -65,14 +68,16 @@ Key variables (there are more, all grouped and commented in the file):
 |---|---|
 | `INPUT_PATH` | A single video file, **or** a folder containing any mix of images/videos (searched recursively) |
 | `FRAME_SKIP` | Keep 1 out of every N decoded frames from videos (1 = every frame) |
-| `YOLO_MODEL_PATH` | Path to `general_product_detection.pt` |
-| `YOLO_CONFIDENCE_THRESHOLD`, `YOLO_IOU_THRESHOLD`, `YOLO_IMG_SIZE`, `YOLO_DEVICE` | Auto-labeling inference settings |
+| `PERSON_MODEL_PATH`, `PERSON_COCO_CLASS_ID`, `PERSON_CONFIDENCE_THRESHOLD`, `PERSON_IOU_THRESHOLD`, `PERSON_IMG_SIZE`, `PERSON_DEVICE` | Stage A ("person") auto-labeling settings |
+| `FACE_MODEL_PATH`, `FACE_CONFIDENCE_THRESHOLD`, `FACE_IOU_THRESHOLD`, `FACE_IMG_SIZE`, `FACE_DEVICE`, `FACE_CROP_PADDING_RATIO`, `FACE_MIN_CROP_SIDE` | Stage B ("face") auto-labeling settings - runs on a padded crop of every person box, not the full frame |
+| `DATASET_CLASS_NAMES` | `["person", "face"]` - class order also fixes the COCO category ids used by the YOLOX/RTMDet exports |
+| `CREATE_DATASET_MOBILENET_SSD` / `CREATE_DATASET_NANODET` / `CREATE_DATASET_YOLOX` / `CREATE_DATASET_RTMDET` | Set any to `False` to skip building that dataset entirely |
 | `TRAIN_VAL_SPLIT_RATIO` | Fraction of auto-labeled images used for training vs. validation |
-| `MOBILENET_SSD_DATASET_DIR` / `NANODET_DATASET_DIR` / `YOLOX_DATASET_DIR` / `RTMDET_DATASET_DIR` | Where each of the 4 datasets is written |
-| `MOBILENET_SSD_*`, `YOLOX_*`, `NANODET_*`, `RTMDET_*` | Per-model training hyperparameters (epochs, batch size, lr, input size, ...) |
+| `MOBILENET_SSD_DATASET_DIR` / `NANODET_DATASET_DIR` / `YOLOX_DATASET_DIR` / `RTMDET_DATASET_DIR` | Where each dataset is written (only built if its `CREATE_DATASET_*` flag is `True`) |
+| `MOBILENET_SSD_*`, `YOLOX_*`, `NANODET_*`, `RTMDET_*` | Per-model training hyperparameters (epochs, batch size, lr, input size, ...) - all 4 automatically train for `len(DATASET_CLASS_NAMES)` = 2 classes now |
 | `INFERENCE_*` and `<MODEL>_INFER_VIDEO_PATH` / `<MODEL>_INFER_CHECKPOINT` | Live-inference video/checkpoint per model, confidence/NMS thresholds, pop-up window scale |
 
-## 3. Build the 4 datasets
+## 3. Build the datasets
 
 ```powershell
 "C:\Users\QBS PC\PycharmProjects\ais-handler-template\.venv\Scripts\python.exe" pipeline.py
@@ -81,12 +86,35 @@ Key variables (there are more, all grouped and commented in the file):
 This will:
 1. Resolve `INPUT_PATH` (video or folder) into a flat list of images, decoding
    every `FRAME_SKIP`-th frame from any videos into `extracted_frames/`.
-2. Run `general_product_detection.pt` over every image (batched, on
-   `YOLO_DEVICE`) to get "product" bounding boxes.
-3. Export the results into 4 ready-to-train dataset folders under `datasets/`.
+2. **Stage A:** run `yolo11x.pt` over every image (batched, on
+   `PERSON_DEVICE`) to get "person" bounding boxes.
+3. **Stage B:** for every person box, crop it (padded by
+   `FACE_CROP_PADDING_RATIO`, clamped to the image bounds, skipped if smaller
+   than `FACE_MIN_CROP_SIDE`) and run `face11n.pt` on that crop to get "face"
+   boxes - which are then translated from crop-local pixel coordinates back
+   into full-image pixel coordinates (crop offset + Ultralytics' own
+   internal letterbox-rescale, which already returns boxes in the crop's
+   own original pixel space - no extra manual resize-ratio math needed on
+   top of that, see the docstring in `src/inference/person_face_labeler.py`).
+4. Export the combined `{"person", "face"}` annotations into whichever of
+   the 4 dataset folders under `datasets/` have their `CREATE_DATASET_*`
+   flag set to `True`.
 
-Images with zero detections are dropped by default
-(`DROP_IMAGES_WITHOUT_DETECTIONS`).
+Images with zero detections (no person AND no face boxes) are dropped by
+default (`DROP_IMAGES_WITHOUT_DETECTIONS`).
+
+## 3b. Sanity-check the labels before training
+
+```powershell
+"C:\Users\QBS PC\PycharmProjects\ais-handler-template\.venv\Scripts\python.exe" tools\preview_dataset_labels.py
+```
+
+Draws the exported boxes on a random sample of images (`NUM_SAMPLES`,
+default 12) from whichever dataset folder `DATASET_DIR` points at in the
+script's own "Local settings" block, and saves them to
+`<dataset>/_label_preview/*.jpg` so you can flip through them in File
+Explorer before spending time training. Auto-detects VOC vs. COCO layout -
+point it at any of the 4 `datasets/*` folders.
 
 ### Dataset layouts produced
 
@@ -234,8 +262,12 @@ config.py                        # every configurable value lives here
 pipeline.py                      # stage 1-3 entry point (labeling + dataset export)
 requirements.txt
 models/
-    general_product_detection.pt # <- put your fine-tuned YOLO11n here
+    yolo11x.pt                   # <- stock COCO-pretrained YOLO11x ("person" class only)
+    face11n.pt                   # <- put your fine-tuned face YOLO11n here
+    general_product_detection.pt # legacy single-class ("product") teacher, no longer used by pipeline.py
 pretrained/                      # generated: auto-downloaded COCO-pretrained YOLOX/RTMDet weights
+tools/
+    preview_dataset_labels.py    # draws exported boxes on a random sample of images for a sanity check
 src/
     common/
         annotation_types.py      # BoxAnnotation / ImageAnnotation
@@ -243,7 +275,8 @@ src/
         detection_transforms.py  # ToTensor / RandomHorizontalFlip for torchvision detection
     inference/
         frame_extractor.py       # video -> every-Nth-frame .jpg
-        auto_labeler.py          # runs YOLO11n, returns ImageAnnotation list
+        auto_labeler.py          # legacy single-model auto-labeler (still usable standalone, unused by pipeline.py)
+        person_face_labeler.py   # two-stage "person" (yolo11x) -> "face" (face11n) auto-labeler used by pipeline.py
         live_runner.py           # shared live-video display loop (FPS overlay, window resize, box drawing)
     dataset_export/
         split.py                 # deterministic train/val split

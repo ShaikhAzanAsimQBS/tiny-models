@@ -6,7 +6,7 @@ pretrained/
 models/*.pt
 !models/.gitkeep
 input_vid/
-
+recordings/
 # Python
 __pycache__/
 *.pyc

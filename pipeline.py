@@ -1,18 +1,26 @@
 """
 Main entry point: run this to go from raw media (a video OR a folder of
-images/videos) all the way to 4 ready-to-train datasets:
+images/videos) all the way to ready-to-train datasets for up to 4 models:
 
     datasets/mobilenet_ssd/   (Pascal VOC layout)
     datasets/nanodet/         (Pascal VOC layout)
     datasets/yolox/           (COCO layout)
     datasets/rtmdet/          (COCO layout)
 
+Which of the 4 are actually built is controlled by config.CREATE_DATASET_*
+(set any to False to skip it).
+
 Steps:
-    1. Resolve INPUT_PATH into a flat list of images to label
-       (videos are decoded, keeping every FRAME_SKIP-th frame).
-    2. Run the fine-tuned YOLO11n teacher model (general_product_detection.pt)
-       over every image/frame to auto-label the "product" class.
-    3. Export the resulting annotations into the 4 dataset formats above.
+1. Resolve INPUT_PATH into a flat list of images to label
+   (videos are decoded, keeping every FRAME_SKIP-th frame).
+2. Two-stage auto-labeling:
+   a. Run the stock, COCO-pretrained YOLO11x model (config.PERSON_MODEL_PATH)
+      over every image/frame to find "person" boxes.
+   b. Run the fine-tuned face11n YOLO11n model (config.FACE_MODEL_PATH) on a
+      padded crop of every person box to find "face" boxes, then translate
+      those crop-local boxes back into full-image pixel coordinates.
+3. Export the resulting {"person", "face"} annotations into whichever of
+   the 4 dataset formats above are enabled.
 
 Everything is controlled via config.py - no command line arguments.
 Run with the CUDA-enabled venv, e.g.:
@@ -28,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 from src.common.media_utils import collect_media
 from src.inference.frame_extractor import extract_frames
-from src.inference.auto_labeler import YoloAutoLabeler
+from src.inference.person_face_labeler import PersonFaceAutoLabeler
 from src.dataset_export.voc_export import export_voc_dataset
 from src.dataset_export.coco_export import export_coco_dataset
 
@@ -59,34 +67,44 @@ def main():
         print("[pipeline] No images/frames found. Check config.INPUT_PATH. Aborting.")
         return
 
-    labeler = YoloAutoLabeler(
-        model_path=config.YOLO_MODEL_PATH,
-        class_names=config.YOLO_CLASS_NAMES,
-        confidence_threshold=config.YOLO_CONFIDENCE_THRESHOLD,
-        iou_threshold=config.YOLO_IOU_THRESHOLD,
-        img_size=config.YOLO_IMG_SIZE,
-        device=config.YOLO_DEVICE,
+    labeler = PersonFaceAutoLabeler(
+        person_model_path=config.PERSON_MODEL_PATH,
+        face_model_path=config.FACE_MODEL_PATH,
     )
-    annotations = labeler.label_images(all_images, batch_size=config.YOLO_INFERENCE_BATCH_SIZE)
+    annotations = labeler.label_images(all_images)
 
-    total_boxes = sum(len(a.boxes) for a in annotations)
-    print(f"[pipeline] Auto-labeled {len(annotations)} images with {total_boxes} total 'product' boxes")
+    person_boxes = sum(1 for a in annotations for b in a.boxes if b.class_name == config.PERSON_CLASS_NAME)
+    face_boxes = sum(1 for a in annotations for b in a.boxes if b.class_name == config.FACE_CLASS_NAME)
+    print(f"[pipeline] Auto-labeled {len(annotations)} images with "
+          f"{person_boxes} 'person' + {face_boxes} 'face' boxes")
 
     if not annotations:
         print("[pipeline] No annotated images to export. Aborting dataset export.")
         return
 
-    print("[pipeline] Exporting MobileNet-SSD dataset (Pascal VOC layout)...")
-    export_voc_dataset(annotations, config.MOBILENET_SSD_DATASET_DIR)
+    if config.CREATE_DATASET_MOBILENET_SSD:
+        print("[pipeline] Exporting MobileNet-SSD dataset (Pascal VOC layout)...")
+        export_voc_dataset(annotations, config.MOBILENET_SSD_DATASET_DIR)
+    else:
+        print("[pipeline] Skipping MobileNet-SSD dataset (CREATE_DATASET_MOBILENET_SSD=False)")
 
-    print("[pipeline] Exporting NanoDet dataset (Pascal VOC layout)...")
-    export_voc_dataset(annotations, config.NANODET_DATASET_DIR)
+    if config.CREATE_DATASET_NANODET:
+        print("[pipeline] Exporting NanoDet dataset (Pascal VOC layout)...")
+        export_voc_dataset(annotations, config.NANODET_DATASET_DIR)
+    else:
+        print("[pipeline] Skipping NanoDet dataset (CREATE_DATASET_NANODET=False)")
 
-    print("[pipeline] Exporting YOLOX-Tiny dataset (COCO layout)...")
-    export_coco_dataset(annotations, config.YOLOX_DATASET_DIR, class_names=config.DATASET_CLASS_NAMES)
+    if config.CREATE_DATASET_YOLOX:
+        print("[pipeline] Exporting YOLOX-Tiny dataset (COCO layout)...")
+        export_coco_dataset(annotations, config.YOLOX_DATASET_DIR, class_names=config.DATASET_CLASS_NAMES)
+    else:
+        print("[pipeline] Skipping YOLOX-Tiny dataset (CREATE_DATASET_YOLOX=False)")
 
-    print("[pipeline] Exporting RTMDet-tiny dataset (COCO layout)...")
-    export_coco_dataset(annotations, config.RTMDET_DATASET_DIR, class_names=config.DATASET_CLASS_NAMES)
+    if config.CREATE_DATASET_RTMDET:
+        print("[pipeline] Exporting RTMDet-tiny dataset (COCO layout)...")
+        export_coco_dataset(annotations, config.RTMDET_DATASET_DIR, class_names=config.DATASET_CLASS_NAMES)
+    else:
+        print("[pipeline] Skipping RTMDet-tiny dataset (CREATE_DATASET_RTMDET=False)")
 
     print("[pipeline] Done. Datasets are ready under:", config.DATASETS_ROOT)
 

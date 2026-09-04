@@ -25,16 +25,19 @@ VENV_PYTHON = r"C:\Users\QBS PC\PycharmProjects\ais-handler-template\.venv\Scrip
 # ---------------------------------------------------------------------------
 # Stage 1 - Input source: a single video OR a folder of images/videos
 # ---------------------------------------------------------------------------
-# Point this at either:
+# Point this at any of:
 #   - a single video file, e.g. r"C:\data\shelf_walkthrough.mp4"
+#   - a remote video URL (http:// / https:// / rtsp:// / rtmp://), e.g. a
+#     direct S3/HTTP link to an .mp4 - streamed and decoded on the fly with
+#     cv2.VideoCapture/ffmpeg, it is NEVER downloaded to disk first
 #   - a folder containing any mix of images and videos (searched recursively),
 #     e.g. r"C:\data\raw_media"
-INPUT_PATH = r"C:\Users\QBS PC\Downloads\images\images"
+INPUT_PATH = r"https://ai-public-videos.s3.us-east-2.amazonaws.com/Raw+Videos/office_exp/office_30min_full_view.mp4"
 
 # When a video is processed (INPUT_PATH itself, or a video found while
 # walking a folder), only every Nth decoded frame is kept/labeled.
 # 1 = keep every frame, 5 = keep 1 out of every 5 frames, etc.
-FRAME_SKIP = 10
+FRAME_SKIP = 15
 
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".wmv", ".mpg", ".mpeg")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
@@ -46,30 +49,69 @@ EXTRACTED_FRAMES_DIR = os.path.join(PROJECT_ROOT, "extracted_frames")
 FRAME_JPEG_QUALITY = 95  # 0-100
 
 # ---------------------------------------------------------------------------
-# Stage 2 - Auto-labeling with the fine-tuned YOLO11n teacher model
+# Stage 2 - Auto-labeling: two-stage "person" -> "face" detector
 # ---------------------------------------------------------------------------
-YOLO_MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "general_product_detection.pt")
-YOLO_CLASS_NAMES = ["product"]  # the single class the teacher model detects
+# Stage 2a: yolo11x.pt is the stock, COCO-pretrained Ultralytics YOLO11x
+# checkpoint (NOT fine-tuned for this project) - it's only used for its
+# "person" class (id 0 in the standard 80-class COCO taxonomy) to find every
+# person in the frame.
+PERSON_MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "yolo11x.pt")
+PERSON_CLASS_NAME = "person"
+PERSON_COCO_CLASS_ID = 0  # "person" in the standard 80-class COCO taxonomy
+PERSON_CONFIDENCE_THRESHOLD = 0.25
+PERSON_IOU_THRESHOLD = 0.45
+PERSON_IMG_SIZE = 640
+PERSON_DEVICE = "cuda:0"  # "cuda:0", "cuda:1", "cpu", ...
+PERSON_INFERENCE_BATCH_SIZE = 16
 
-YOLO_CONFIDENCE_THRESHOLD = 0.25
-YOLO_IOU_THRESHOLD = 0.45
-YOLO_IMG_SIZE = 640
-YOLO_DEVICE = "cuda:0"  # "cuda:0", "cuda:1", "cpu", ...
-YOLO_INFERENCE_BATCH_SIZE = 16
+# Stage 2b: face11n.pt is a fine-tuned YOLO11n checkpoint with a single
+# "face" class. It does NOT run on the full frame - it runs on a padded crop
+# of every person box found in stage 2a instead, which gives it a much
+# higher effective resolution to work with per-face (especially important
+# for people who are small/far-away in the full frame). Face boxes are then
+# translated from crop-local pixel coordinates back into full-frame pixel
+# coordinates (crop offset + Ultralytics' own internal letterbox-rescale,
+# which already returns boxes in the crop's own original pixel space).
+FACE_MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "face11n.pt")
+FACE_CLASS_NAME = "face"
+FACE_CONFIDENCE_THRESHOLD = 0.25
+FACE_IOU_THRESHOLD = 0.45
+FACE_IMG_SIZE = 640
+FACE_DEVICE = "cuda:0"
+FACE_INFERENCE_BATCH_SIZE = 16
+# Expands every person box by this fraction of its own width/height on each
+# side (clamped to the image bounds) before cropping for face detection, so
+# a face near the edge of a slightly-too-tight person box doesn't get cut off.
+FACE_CROP_PADDING_RATIO = 0.15
+# Person crops with either side smaller than this many pixels are skipped
+# for face detection entirely (too small to contain a resolvable face, and
+# not worth the extra inference call).
+FACE_MIN_CROP_SIDE = 20
 
-# If True, images/frames with zero detections are discarded and never make
-# it into any of the 3 output datasets.
+# If True, images/frames with zero detections (no person AND no face boxes)
+# are discarded and never make it into any of the output datasets.
 DROP_IMAGES_WITHOUT_DETECTIONS = True
 
 # ---------------------------------------------------------------------------
-# Stage 3 - Dataset build (auto-labeled detections -> 3 training datasets)
+# Stage 3 - Dataset build (auto-labeled detections -> training datasets)
 # ---------------------------------------------------------------------------
 DATASETS_ROOT = os.path.join(PROJECT_ROOT, "datasets")
 
-TRAIN_VAL_SPLIT_RATIO = 0.9  # fraction of images assigned to the train split
+TRAIN_VAL_SPLIT_RATIO = 0.75  # fraction of images assigned to the train split
 SPLIT_RANDOM_SEED = 42
 
-DATASET_CLASS_NAMES = ["product"]  # must match YOLO_CLASS_NAMES
+# class_id 0 = person, class_id 1 = face. Order also defines the COCO
+# category ids written out for the YOLOX/RTMDet exports.
+DATASET_CLASS_NAMES = ["person", "face"]
+
+# Toggle which of the 4 dataset formats pipeline.py actually builds. Set any
+# of these to False to skip that export entirely - e.g. if you only want to
+# (re)train one or two of the 4 models right now, there's no need to also
+# rebuild the datasets for the other ones.
+CREATE_DATASET_MOBILENET_SSD = False
+CREATE_DATASET_NANODET = False
+CREATE_DATASET_YOLOX = True
+CREATE_DATASET_RTMDET = False
 
 # MobileNet-SSD dataset - Pascal VOC layout:
 #   JPEGImages/*.jpg, Annotations/*.xml, ImageSets/Main/{train,val}.txt
@@ -111,7 +153,7 @@ MOBILENET_SSD_SCORE_THRESH = 0.35  # inference score threshold baked into the ex
 
 # ---------------- YOLOX-Tiny (vendored external/YOLOX) ---------------------
 YOLOX_REPO_DIR = os.path.join(PROJECT_ROOT, "external", "YOLOX")
-YOLOX_EXPERIMENT_NAME = "yolox_tiny_product"
+YOLOX_EXPERIMENT_NAME = "yolox_tiny_person_face"
 YOLOX_OUTPUT_DIR = os.path.join(RUNS_ROOT, "yolox_tiny")
 YOLOX_MAX_EPOCH = 50
 YOLOX_BATCH_SIZE = 16
