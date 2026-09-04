@@ -58,6 +58,23 @@ def build_exp():
     exp.data_num_workers = config.YOLOX_DATA_NUM_WORKERS
     exp.output_dir = config.YOLOX_OUTPUT_DIR
     exp.exp_name = config.YOLOX_EXPERIMENT_NAME
+
+    # Anti-overfitting / augmentation knobs - see config.py for the
+    # reasoning behind each default.
+    exp.mosaic_prob = config.YOLOX_MOSAIC_PROB
+    exp.mixup_prob = config.YOLOX_MIXUP_PROB
+    exp.enable_mixup = config.YOLOX_ENABLE_MIXUP
+    exp.hsv_prob = config.YOLOX_HSV_PROB
+    exp.flip_prob = config.YOLOX_FLIP_PROB
+    exp.degrees = config.YOLOX_DEGREES
+    exp.translate = config.YOLOX_TRANSLATE
+    exp.shear = config.YOLOX_SHEAR
+    exp.mosaic_scale = config.YOLOX_MOSAIC_SCALE
+    exp.mixup_scale = config.YOLOX_MIXUP_SCALE
+    exp.weight_decay = config.YOLOX_WEIGHT_DECAY
+    exp.momentum = config.YOLOX_MOMENTUM
+    exp.min_lr_ratio = config.YOLOX_MIN_LR_RATIO
+    exp.ema = config.YOLOX_EMA
     return exp
 
 

@@ -21,6 +21,22 @@ Bounding-box correctness across the crop boundary:
     resize-ratio math is required (and doing so on top would double-scale
     the boxes) - this module only ever adds an offset to already-correctly-
     scaled crop-local coordinates.
+
+Memory / robustness, for large (tens of thousands of images) runs:
+    - Stage A and stage B are interleaved PER BATCH (stage B runs on a
+      batch's crops immediately after stage A produces them) instead of
+      running stage A over the *entire* dataset first and only then
+      starting stage B. That bounds how many decoded crop images can be
+      resident in memory at once to ~face_batch_size, instead of
+      accumulating one crop per person box across the whole dataset.
+    - Passing a list of paths to Ultralytics' `.predict()` routes through
+      its PIL-based loader (`autocast_list`), which fully decodes every
+      image in that list up front. A single corrupt/anomalous file in a
+      batch (truncated write, decompression bomb, etc.) can throw
+      (observed in practice as a `MemoryError`) and would otherwise kill an
+      hours-long run over tens of thousands of images. Both stages retry
+      failed batches one item at a time and skip+log only the offending
+      file(s), so one bad image no longer aborts the whole pipeline.
 """
 
 from collections import defaultdict
@@ -112,23 +128,14 @@ class PersonFaceAutoLabeler:
         cy2 = min(img_h, int(round(ymax + pad_y)))
         return cx1, cy1, cx2, cy2
 
-    def label_images(self, image_paths: List[str],
-                      person_batch_size: int = None,
-                      face_batch_size: int = None) -> List[ImageAnnotation]:
-        person_batch_size = config.PERSON_INFERENCE_BATCH_SIZE if person_batch_size is None else person_batch_size
-        face_batch_size = config.FACE_INFERENCE_BATCH_SIZE if face_batch_size is None else face_batch_size
-
-        person_dets_per_image: Dict[str, List[BoxAnnotation]] = {}
-        image_sizes: Dict[str, Tuple[int, int]] = {}
-        # (image_path, crop_array, offset_x, offset_y) for every person box
-        # big enough to bother running the face model on.
-        crop_jobs: List[Tuple[str, np.ndarray, float, float]] = []
-
-        # ---- Stage A: batched person detection over full images ----------
-        for start in range(0, len(image_paths), person_batch_size):
-            batch_paths = image_paths[start:start + person_batch_size]
+    def _predict_person_batch(self, paths: List[str]) -> List[Tuple[str, object]]:
+        """Runs the person model on a batch of image paths. If the whole
+        batch call fails (e.g. MemoryError from one corrupt/anomalous
+        image), retries one image at a time and skips+logs only the
+        offending file(s), instead of aborting the entire run."""
+        try:
             results = self.person_model.predict(
-                source=batch_paths,
+                source=paths,
                 conf=self.person_conf,
                 iou=self.person_iou,
                 imgsz=self.person_img_size,
@@ -136,8 +143,91 @@ class PersonFaceAutoLabeler:
                 classes=[self.person_coco_class_id],
                 verbose=False,
             )
+            return list(zip(paths, results))
+        except Exception as exc:
+            print(f"[person_face_labeler] WARNING: person-model batch of {len(paths)} image(s) "
+                  f"failed ({type(exc).__name__}: {exc}). Retrying one image at a time to "
+                  f"isolate the bad file(s)...")
+            ok_pairs: List[Tuple[str, object]] = []
+            for path in paths:
+                try:
+                    result = self.person_model.predict(
+                        source=[path],
+                        conf=self.person_conf,
+                        iou=self.person_iou,
+                        imgsz=self.person_img_size,
+                        device=self.person_device,
+                        classes=[self.person_coco_class_id],
+                        verbose=False,
+                    )[0]
+                    ok_pairs.append((path, result))
+                except Exception as exc2:
+                    print(f"[person_face_labeler] SKIPPING unreadable/corrupt image "
+                          f"(person stage): {path} ({type(exc2).__name__}: {exc2})")
+            return ok_pairs
 
-            for path, result in zip(batch_paths, results):
+    def _predict_face_batch(self, jobs: List[Tuple[str, np.ndarray, float, float]]
+                             ) -> List[Tuple[str, np.ndarray, float, float, object]]:
+        """jobs: list of (image_path, crop, off_x, off_y). Same
+        batch-then-fallback-to-one-at-a-time resilience as
+        _predict_person_batch, applied to the face model on crops."""
+        crop_arrays = [job[1] for job in jobs]
+        try:
+            results = self.face_model.predict(
+                source=crop_arrays,
+                conf=self.face_conf,
+                iou=self.face_iou,
+                imgsz=self.face_img_size,
+                device=self.face_device,
+                verbose=False,
+            )
+            return [(j[0], j[1], j[2], j[3], r) for j, r in zip(jobs, results)]
+        except Exception as exc:
+            print(f"[person_face_labeler] WARNING: face-model batch of {len(jobs)} crop(s) "
+                  f"failed ({type(exc).__name__}: {exc}). Retrying one crop at a time...")
+            ok_jobs: List[Tuple[str, np.ndarray, float, float, object]] = []
+            for job in jobs:
+                try:
+                    result = self.face_model.predict(
+                        source=[job[1]],
+                        conf=self.face_conf,
+                        iou=self.face_iou,
+                        imgsz=self.face_img_size,
+                        device=self.face_device,
+                        verbose=False,
+                    )[0]
+                    ok_jobs.append((job[0], job[1], job[2], job[3], result))
+                except Exception as exc2:
+                    print(f"[person_face_labeler] SKIPPING a person crop from {job[0]} "
+                          f"(face stage): ({type(exc2).__name__}: {exc2})")
+            return ok_jobs
+
+    def label_images(self, image_paths: List[str],
+                      person_batch_size: int = None,
+                      face_batch_size: int = None) -> List[ImageAnnotation]:
+        person_batch_size = config.PERSON_INFERENCE_BATCH_SIZE if person_batch_size is None else person_batch_size
+        face_batch_size = config.FACE_INFERENCE_BATCH_SIZE if face_batch_size is None else face_batch_size
+
+        person_dets_per_image: Dict[str, List[BoxAnnotation]] = {}
+        face_dets_per_image: Dict[str, List[BoxAnnotation]] = defaultdict(list)
+        image_sizes: Dict[str, Tuple[int, int]] = {}
+
+        total_person_boxes = 0
+        total_crops_queued = 0
+        total_face_boxes = 0
+
+        for start in range(0, len(image_paths), person_batch_size):
+            batch_paths = image_paths[start:start + person_batch_size]
+
+            # ---- Stage A: person detection for this batch -----------------
+            path_result_pairs = self._predict_person_batch(batch_paths)
+
+            # (image_path, crop_array, offset_x, offset_y) for every person
+            # box in THIS batch only - never accumulated across the whole
+            # dataset, to keep memory bounded regardless of dataset size.
+            batch_crop_jobs: List[Tuple[str, np.ndarray, float, float]] = []
+
+            for path, result in path_result_pairs:
                 height, width = result.orig_shape
                 image_sizes[path] = (width, height)
 
@@ -150,6 +240,7 @@ class PersonFaceAutoLabeler:
                         confidence=float(box.conf.item()),
                     ))
                 person_dets_per_image[path] = boxes
+                total_person_boxes += len(boxes)
 
                 # result.orig_img is the exact BGR array Ultralytics already
                 # decoded for this image - reuse it instead of re-reading
@@ -164,54 +255,40 @@ class PersonFaceAutoLabeler:
                     crop = orig_img[cy1:cy2, cx1:cx2]
                     if crop.size == 0:
                         continue
-                    crop_jobs.append((path, crop, float(cx1), float(cy1)))
+                    batch_crop_jobs.append((path, crop, float(cx1), float(cy1)))
 
-            print(f"[person_face_labeler] stage A (person): "
-                  f"{min(start + person_batch_size, len(image_paths))}/{len(image_paths)} images")
+            total_crops_queued += len(batch_crop_jobs)
 
-        total_person_boxes = sum(len(b) for b in person_dets_per_image.values())
-        print(f"[person_face_labeler] found {total_person_boxes} person box(es) across "
-              f"{len(image_paths)} images -> {len(crop_jobs)} crop(s) queued for face detection")
+            # ---- Stage B: face detection on this batch's crops, right away
+            # (not deferred to the end), so crops never pile up in memory.
+            for fstart in range(0, len(batch_crop_jobs), face_batch_size):
+                fbatch = batch_crop_jobs[fstart:fstart + face_batch_size]
+                for path, _crop, off_x, off_y, result in self._predict_face_batch(fbatch):
+                    for box in result.boxes:
+                        fx1, fy1, fx2, fy2 = [float(v) for v in box.xyxy[0].tolist()]
+                        # Ultralytics already rescaled (fx1,fy1,fx2,fy2) to
+                        # this crop's own pixel dimensions - just translate
+                        # by the crop's offset within the full image.
+                        face_dets_per_image[path].append(BoxAnnotation(
+                            class_id=1, class_name=self.face_class_name,
+                            xmin=fx1 + off_x, ymin=fy1 + off_y,
+                            xmax=fx2 + off_x, ymax=fy2 + off_y,
+                            confidence=float(box.conf.item()),
+                        ))
+                        total_face_boxes += 1
 
-        # ---- Stage B: batched face detection over every person crop -------
-        face_dets_per_image: Dict[str, List[BoxAnnotation]] = defaultdict(list)
-        for start in range(0, len(crop_jobs), face_batch_size):
-            batch = crop_jobs[start:start + face_batch_size]
-            crop_arrays = [item[1] for item in batch]
-            results = self.face_model.predict(
-                source=crop_arrays,
-                conf=self.face_conf,
-                iou=self.face_iou,
-                imgsz=self.face_img_size,
-                device=self.face_device,
-                verbose=False,
-            )
+            print(f"[person_face_labeler] {min(start + person_batch_size, len(image_paths))}/{len(image_paths)} "
+                  f"images - person boxes so far: {total_person_boxes}, "
+                  f"face crops sent so far: {total_crops_queued}, face boxes so far: {total_face_boxes}")
 
-            for (path, _crop, off_x, off_y), result in zip(batch, results):
-                for box in result.boxes:
-                    fx1, fy1, fx2, fy2 = [float(v) for v in box.xyxy[0].tolist()]
-                    # Ultralytics already rescaled (fx1,fy1,fx2,fy2) to this
-                    # crop's own pixel dimensions - just translate by the
-                    # crop's offset within the full image.
-                    face_dets_per_image[path].append(BoxAnnotation(
-                        class_id=1, class_name=self.face_class_name,
-                        xmin=fx1 + off_x, ymin=fy1 + off_y,
-                        xmax=fx2 + off_x, ymax=fy2 + off_y,
-                        confidence=float(box.conf.item()),
-                    ))
-
-            if crop_jobs:
-                print(f"[person_face_labeler] stage B (face): "
-                      f"{min(start + face_batch_size, len(crop_jobs))}/{len(crop_jobs)} crops")
-
-        total_face_boxes = sum(len(b) for b in face_dets_per_image.values())
-        print(f"[person_face_labeler] found {total_face_boxes} face box(es)")
+        print(f"[person_face_labeler] done: {total_person_boxes} person box(es), {total_face_boxes} face box(es) "
+              f"across {len(image_paths)} images ({total_crops_queued} person crop(s) sent to the face model)")
 
         # ---- Merge stage A + stage B results per image --------------------
         annotations: List[ImageAnnotation] = []
         for path in image_paths:
             if path not in image_sizes:
-                continue
+                continue  # image failed to load in stage A and was skipped
             width, height = image_sizes[path]
             boxes = list(person_dets_per_image.get(path, [])) + list(face_dets_per_image.get(path, []))
             if config.DROP_IMAGES_WITHOUT_DETECTIONS and not boxes:

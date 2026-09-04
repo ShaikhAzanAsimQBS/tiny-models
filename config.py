@@ -32,7 +32,7 @@ VENV_PYTHON = r"C:\Users\QBS PC\PycharmProjects\ais-handler-template\.venv\Scrip
 #     cv2.VideoCapture/ffmpeg, it is NEVER downloaded to disk first
 #   - a folder containing any mix of images and videos (searched recursively),
 #     e.g. r"C:\data\raw_media"
-INPUT_PATH = r"https://ai-public-videos.s3.us-east-2.amazonaws.com/Raw+Videos/office_exp/office_30min_full_view.mp4"
+INPUT_PATH = r"C:\Users\QBS PC\PycharmProjects\dataset_creator\extracted_frames"
 
 # When a video is processed (INPUT_PATH itself, or a video found while
 # walking a folder), only every Nth decoded frame is kept/labeled.
@@ -99,6 +99,19 @@ DATASETS_ROOT = os.path.join(PROJECT_ROOT, "datasets")
 
 TRAIN_VAL_SPLIT_RATIO = 0.75  # fraction of images assigned to the train split
 SPLIT_RANDOM_SEED = 42
+# "sequential" (recommended, default): splits WITHIN each source folder
+# (each video's own subfolder under extracted_frames/, or a plain images
+# folder) by path order, taking the first TRAIN_VAL_SPLIT_RATIO fraction as
+# train and the rest as val. Consecutive video frames are near-duplicates
+# of each other, so a plain "random" shuffle-then-slice scatters
+# near-identical frames across BOTH splits - the model then gets validated
+# on images almost pixel-identical to ones it trained on, which inflates
+# val mAP and HIDES overfitting instead of catching it. "sequential" avoids
+# that leak (only the few frames right at each group's split boundary are
+# similar across train/val) while still letting every video/folder
+# contribute to both splits. Use "random" only if every image is an
+# independent photo (no video frames involved).
+TRAIN_VAL_SPLIT_STRATEGY = "sequential"  # "sequential" or "random"
 
 # class_id 0 = person, class_id 1 = face. Order also defines the COCO
 # category ids written out for the YOLOX/RTMDet exports.
@@ -155,14 +168,35 @@ MOBILENET_SSD_SCORE_THRESH = 0.35  # inference score threshold baked into the ex
 YOLOX_REPO_DIR = os.path.join(PROJECT_ROOT, "external", "YOLOX")
 YOLOX_EXPERIMENT_NAME = "yolox_tiny_person_face"
 YOLOX_OUTPUT_DIR = os.path.join(RUNS_ROOT, "yolox_tiny")
+# Megvii's own "train on custom data" guidance: if training overfits early,
+# reduce max_epoch (and/or basic_lr_per_img / min_lr_ratio below) rather
+# than fighting it with the schedule alone. 50 is already on the low end of
+# their recommended 50-150 range for large custom datasets (ours is "large"
+# in raw instance count, see the anti-overfitting note further below) -
+# watch YOLOX_EVAL_INTERVAL's val AP in the training log / TensorBoard
+# (`tensorboard --logdir runs/yolox_tiny`) and lower this if val AP peaks
+# and then drops while train loss keeps falling (the textbook overfitting
+# signature) well before epoch 50.
 YOLOX_MAX_EPOCH = 50
 YOLOX_BATCH_SIZE = 16
 YOLOX_INPUT_SIZE = (416, 416)  # (height, width), must be multiples of 32
 YOLOX_TEST_SIZE = (416, 416)
 YOLOX_WARMUP_EPOCHS = 5
+# Epochs use to close Mosaic/MixUp and switch on L1 loss (official YOLOX
+# default and recommendation for custom datasets - see anti-overfitting
+# block below). Do NOT set this much lower than ~10-15: the YOLOX authors
+# found 5 measurably underperforms 10/15 on custom data, since it doesn't
+# leave the detector enough iterations to converge on the true (non-mosaic)
+# image distribution before training ends.
 YOLOX_NO_AUG_EPOCHS = 15
 YOLOX_BASIC_LR_PER_IMG = 0.01 / 64.0
-YOLOX_EVAL_INTERVAL = 10
+# Evaluated every N epochs; best_ckpt.pth (highest val AP so far) is
+# updated on every eval, and IS what YOLOX_INFER_CHECKPOINT points at below
+# - i.e. this doubles as your "early stopping" checkpoint selection without
+# needing to babysit/kill the run manually. A smaller interval than the
+# official default (10) gives finer-grained monitoring/selection, cheap
+# relative to how long training itself takes on a dataset this size.
+YOLOX_EVAL_INTERVAL = 5
 YOLOX_PRINT_INTERVAL = 10
 YOLOX_DATA_NUM_WORKERS = 4
 # Official COCO-pretrained YOLOX-Tiny weights, used as the fine-tuning start point.
@@ -179,6 +213,42 @@ YOLOX_FP16 = False
 YOLOX_RESUME = True
 YOLOX_OCCUPY_GPU = False
 YOLOX_CACHE_IMGS = None  # None, "ram" or "disk"
+
+# ---- YOLOX-Tiny anti-overfitting / augmentation tuning ---------------------
+# Sources: Megvii's official "train_custom_data.md", the YOLOX no_aug_epochs
+# design discussion (github.com/Megvii-BaseDetection/YOLOX/issues/555), and
+# MMYOLO's "training testing tricks" doc. Their consistent guidance:
+#   - Small/tiny models -> WEAKEN geometric augmentation (degrees/
+#     translate/shear/mosaic_scale) relative to the base (yolox-s/m/l/x)
+#     defaults, and keep mixup OFF (official yolox_tiny.py already does
+#     this - it's why our defaults below match it rather than yolox_base.py).
+#   - Large datasets -> lighter augmentation and fewer epochs than the
+#     300-epoch COCO-from-scratch recipe; small datasets -> stronger aug.
+#   - If you still see val AP peak then decline while train loss keeps
+#     dropping, reduce YOLOX_MAX_EPOCH / YOLOX_BASIC_LR_PER_IMG /
+#     YOLOX_MIN_LR_RATIO next, per Megvii's own advice, rather than pushing
+#     augmentation to extremes.
+# Our dataset is large in raw instance count (see the person/face count
+# discussion in chat) but many frames come from continuous video, i.e. lots
+# of near-duplicate frames rather than truly independent scenes - that's an
+# overfitting risk *to the specific background/scene*, not a "too little
+# data" risk, and it's the main reason TRAIN_VAL_SPLIT_STRATEGY above is set
+# to "sequential" rather than "random" (a random split would let
+# near-duplicate frames leak between train/val and mask exactly this).
+YOLOX_MOSAIC_PROB = 1.0           # kept on - auto-disabled for the final YOLOX_NO_AUG_EPOCHS anyway
+YOLOX_MIXUP_PROB = 1.0            # only used if YOLOX_ENABLE_MIXUP is True
+YOLOX_ENABLE_MIXUP = False        # matches official yolox_tiny.py - mixup is too aggressive for a tiny model
+YOLOX_HSV_PROB = 1.0              # color-jitter aug; cheap and safe, doesn't distort box geometry
+YOLOX_FLIP_PROB = 0.5
+YOLOX_DEGREES = 5.0               # weaker than yolox_base.py's 10.0 default (tiny model -> weaker geometric aug)
+YOLOX_TRANSLATE = 0.05            # weaker than yolox_base.py's 0.1 default
+YOLOX_SHEAR = 1.0                 # weaker than yolox_base.py's 2.0 default
+YOLOX_MOSAIC_SCALE = (0.5, 1.5)   # matches official yolox_tiny.py (yolox_base.py default is the wider (0.1, 2))
+YOLOX_MIXUP_SCALE = (0.5, 1.5)
+YOLOX_WEIGHT_DECAY = 5e-4         # official default - L2 regularization on conv/linear weights
+YOLOX_MOMENTUM = 0.9
+YOLOX_MIN_LR_RATIO = 0.05         # cosine LR floor, as a fraction of the peak LR
+YOLOX_EMA = True                  # exponential moving average of weights - smooths noisy updates, reduces overfitting
 
 # ---------------- NanoDet-Plus-m (vendored external/nanodet) ---------------
 NANODET_REPO_DIR = os.path.join(PROJECT_ROOT, "external", "nanodet")
