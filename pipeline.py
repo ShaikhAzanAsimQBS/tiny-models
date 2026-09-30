@@ -13,14 +13,10 @@ Which of the 4 are actually built is controlled by config.CREATE_DATASET_*
 Steps:
 1. Resolve INPUT_PATH into a flat list of images to label
    (videos are decoded, keeping every FRAME_SKIP-th frame).
-2. Two-stage auto-labeling:
-   a. Run the stock, COCO-pretrained YOLO11x model (config.PERSON_MODEL_PATH)
-      over every image/frame to find "person" boxes.
-   b. Run the fine-tuned face11n YOLO11n model (config.FACE_MODEL_PATH) on a
-      padded crop of every person box to find "face" boxes, then translate
-      those crop-local boxes back into full-image pixel coordinates.
-3. Export the resulting {"person", "face"} annotations into whichever of
-   the 4 dataset formats above are enabled.
+2. Auto-label according to config.AUTO_LABEL_MODE:
+   - "product": run general_product_detection.pt on each full image.
+   - "person_face": yolo11x (person) then face11n on each person crop.
+3. Export annotations into whichever of the 4 dataset formats are enabled.
 
 Everything is controlled via config.py - no command line arguments.
 Run with the CUDA-enabled venv, e.g.:
@@ -36,9 +32,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 from src.common.media_utils import collect_media
 from src.inference.frame_extractor import extract_frames
+from src.inference.auto_labeler import YoloAutoLabeler
 from src.inference.person_face_labeler import PersonFaceAutoLabeler
 from src.dataset_export.voc_export import export_voc_dataset
 from src.dataset_export.coco_export import export_coco_dataset
+from src.dataset_export.dedupe_faces import dedupe_coco_dataset_dir
 
 
 def gather_images_to_label():
@@ -67,16 +65,30 @@ def main():
         print("[pipeline] No images/frames found. Check config.INPUT_PATH. Aborting.")
         return
 
-    labeler = PersonFaceAutoLabeler(
-        person_model_path=config.PERSON_MODEL_PATH,
-        face_model_path=config.FACE_MODEL_PATH,
-    )
-    annotations = labeler.label_images(all_images)
+    mode = getattr(config, "AUTO_LABEL_MODE", "person_face")
+    print(f"[pipeline] AUTO_LABEL_MODE={mode}")
 
-    person_boxes = sum(1 for a in annotations for b in a.boxes if b.class_name == config.PERSON_CLASS_NAME)
-    face_boxes = sum(1 for a in annotations for b in a.boxes if b.class_name == config.FACE_CLASS_NAME)
-    print(f"[pipeline] Auto-labeled {len(annotations)} images with "
-          f"{person_boxes} 'person' + {face_boxes} 'face' boxes")
+    if mode == "product":
+        labeler = YoloAutoLabeler(
+            model_path=config.PRODUCT_MODEL_PATH,
+            class_names=list(config.PRODUCT_CLASS_NAMES),
+        )
+        annotations = labeler.label_images(all_images)
+        product_boxes = sum(len(a.boxes) for a in annotations)
+        print(f"[pipeline] Auto-labeled {len(annotations)} images with "
+              f"{product_boxes} 'product' boxes")
+    elif mode == "person_face":
+        labeler = PersonFaceAutoLabeler(
+            person_model_path=config.PERSON_MODEL_PATH,
+            face_model_path=config.FACE_MODEL_PATH,
+        )
+        annotations = labeler.label_images(all_images)
+        person_boxes = sum(1 for a in annotations for b in a.boxes if b.class_name == config.PERSON_CLASS_NAME)
+        face_boxes = sum(1 for a in annotations for b in a.boxes if b.class_name == config.FACE_CLASS_NAME)
+        print(f"[pipeline] Auto-labeled {len(annotations)} images with "
+              f"{person_boxes} 'person' + {face_boxes} 'face' boxes")
+    else:
+        raise ValueError(f"Unknown AUTO_LABEL_MODE={mode!r} (expected 'product' or 'person_face')")
 
     if not annotations:
         print("[pipeline] No annotated images to export. Aborting dataset export.")
@@ -97,6 +109,10 @@ def main():
     if config.CREATE_DATASET_YOLOX:
         print("[pipeline] Exporting YOLOX-Tiny dataset (COCO layout)...")
         export_coco_dataset(annotations, config.YOLOX_DATASET_DIR, class_names=config.DATASET_CLASS_NAMES)
+        if config.YOLOX_DEDUPE_FACES and mode == "person_face":
+            print("[pipeline] Deduping extra face boxes in the YOLOX dataset (1 face per person)...")
+            removed = dedupe_coco_dataset_dir(config.YOLOX_DATASET_DIR)
+            print(f"[pipeline] YOLOX face dedupe removed {removed} extra face box(es)")
     else:
         print("[pipeline] Skipping YOLOX-Tiny dataset (CREATE_DATASET_YOLOX=False)")
 

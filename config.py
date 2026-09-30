@@ -32,7 +32,7 @@ VENV_PYTHON = r"C:\Users\QBS PC\PycharmProjects\ais-handler-template\.venv\Scrip
 #     cv2.VideoCapture/ffmpeg, it is NEVER downloaded to disk first
 #   - a folder containing any mix of images and videos (searched recursively),
 #     e.g. r"C:\data\raw_media"
-INPUT_PATH = r"C:\Users\QBS PC\PycharmProjects\dataset_creator\extracted_frames"
+INPUT_PATH = r"C:\Users\QBS PC\Downloads\ALOT_OF_PRODUCTS.v3i.yolov8\images"
 
 # When a video is processed (INPUT_PATH itself, or a video found while
 # walking a folder), only every Nth decoded frame is kept/labeled.
@@ -47,6 +47,23 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
 # here).
 EXTRACTED_FRAMES_DIR = os.path.join(PROJECT_ROOT, "extracted_frames")
 FRAME_JPEG_QUALITY = 95  # 0-100
+
+# ---------------------------------------------------------------------------
+# Stage 2 - Auto-labeling mode
+# ---------------------------------------------------------------------------
+# "product"     : run models/general_product_detection.pt on each full image
+#                 and label the single "product" class (YOLOX product dataset).
+# "person_face" : yolo11x (person) then face11n on each person crop.
+AUTO_LABEL_MODE = "product"  # "product" or "person_face"
+
+# Stage 2-product: fine-tuned YOLO11n, 1 class "product"
+PRODUCT_MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "general_product_detection.pt")
+PRODUCT_CLASS_NAMES = ["product"]
+PRODUCT_CONFIDENCE_THRESHOLD = 0.25
+PRODUCT_IOU_THRESHOLD = 0.45
+PRODUCT_IMG_SIZE = 640
+PRODUCT_DEVICE = "cuda:0"
+PRODUCT_INFERENCE_BATCH_SIZE = 16
 
 # ---------------------------------------------------------------------------
 # Stage 2 - Auto-labeling: two-stage "person" -> "face" detector
@@ -111,11 +128,11 @@ SPLIT_RANDOM_SEED = 42
 # similar across train/val) while still letting every video/folder
 # contribute to both splits. Use "random" only if every image is an
 # independent photo (no video frames involved).
-TRAIN_VAL_SPLIT_STRATEGY = "sequential"  # "sequential" or "random"
+TRAIN_VAL_SPLIT_STRATEGY = "random"  # "sequential" or "random" — random for independent product photos
 
-# class_id 0 = person, class_id 1 = face. Order also defines the COCO
-# category ids written out for the YOLOX/RTMDet exports.
-DATASET_CLASS_NAMES = ["person", "face"]
+# Must match the teacher: ["product"] in product mode, ["person", "face"] in person_face mode.
+# Order also defines the COCO category ids written out for the YOLOX/RTMDet exports.
+DATASET_CLASS_NAMES = ["product"]
 
 # Toggle which of the 4 dataset formats pipeline.py actually builds. Set any
 # of these to False to skip that export entirely - e.g. if you only want to
@@ -136,7 +153,25 @@ NANODET_DATASET_DIR = os.path.join(DATASETS_ROOT, "nanodet")
 
 # YOLOX dataset - COCO layout:
 #   train2017/*.jpg, val2017/*.jpg, annotations/instances_{train,val}2017.json
-YOLOX_DATASET_DIR = os.path.join(DATASETS_ROOT, "yolox")
+# Product labels go to yolox_product so the earlier person/face dataset
+# under datasets/yolox is left alone.
+YOLOX_DATASET_DIR = os.path.join(DATASETS_ROOT, "yolox_product")
+
+# Extra videos to label with the product teacher and APPEND onto the
+# existing yolox_product train2017/val2017 (does not rebuild or delete
+# the current ~18k images). Used by tools/append_yolox_product_videos.py.
+APPEND_PRODUCT_VIDEO_PATHS = [
+    r"C:\Users\QBS PC\Downloads\v4.mp4",
+    r"C:\Users\QBS PC\Downloads\v3.mp4",
+]
+APPEND_PRODUCT_FRAME_SKIP = 5
+# After the YOLOX COCO files are written, drop extra face boxes so each
+# person box keeps at most one face. Only meaningful in person_face mode.
+YOLOX_DEDUPE_FACES = False
+# A face is treated as "inside" a person if its center is in the person
+# box OR at least this fraction of the face's own area overlaps the person
+# (covers faces that slightly overflow a tight person box).
+FACE_IN_PERSON_MIN_CONTAINMENT = 0.5
 
 # RTMDet dataset - COCO layout (identical structure to YOLOX's, this is the
 # exact format mmdetection's CocoDataset expects):
@@ -166,7 +201,7 @@ MOBILENET_SSD_SCORE_THRESH = 0.35  # inference score threshold baked into the ex
 
 # ---------------- YOLOX-Tiny (vendored external/YOLOX) ---------------------
 YOLOX_REPO_DIR = os.path.join(PROJECT_ROOT, "external", "YOLOX")
-YOLOX_EXPERIMENT_NAME = "yolox_tiny_person_face"
+YOLOX_EXPERIMENT_NAME = "yolox_tiny_product_new"
 YOLOX_OUTPUT_DIR = os.path.join(RUNS_ROOT, "yolox_tiny")
 # Megvii's own "train on custom data" guidance: if training overfits early,
 # reduce max_epoch (and/or basic_lr_per_img / min_lr_ratio below) rather
@@ -210,7 +245,7 @@ YOLOX_FP16 = False
 # epoch under YOLOX_OUTPUT_DIR/YOLOX_EXPERIMENT_NAME) and continues training
 # up to YOLOX_MAX_EPOCH. Set back to False once you want to start a new run
 # from the pretrained weights again.
-YOLOX_RESUME = True
+YOLOX_RESUME = False
 YOLOX_OCCUPY_GPU = False
 YOLOX_CACHE_IMGS = None  # None, "ram" or "disk"
 
@@ -328,6 +363,20 @@ MOBILENET_SSD_INFER_CHECKPOINT = os.path.join(MOBILENET_SSD_OUTPUT_DIR, "mobilen
 
 YOLOX_INFER_VIDEO_PATH = INPUT_PATH
 YOLOX_INFER_CHECKPOINT = os.path.join(YOLOX_OUTPUT_DIR, YOLOX_EXPERIMENT_NAME, "best_ckpt.pth")
+
+# ---------------- YOLOX-Tiny ONNX export (training/export_yolox_tiny_onnx.py) -
+# Defaults to the same checkpoint live inference uses (best_ckpt.pth). Point
+# this at latest_ckpt.pth if you want to export a mid-run snapshot.
+YOLOX_ONNX_CHECKPOINT = YOLOX_INFER_CHECKPOINT
+YOLOX_ONNX_OUTPUT_PATH = os.path.join(YOLOX_OUTPUT_DIR, YOLOX_EXPERIMENT_NAME, "yolox_tiny.onnx")
+YOLOX_ONNX_OPSET = 11  # official YOLOX default; use 10 if you will convert further to OpenVINO
+YOLOX_ONNX_BATCH_SIZE = 1
+YOLOX_ONNX_DYNAMIC_BATCH = False
+# Official YOLOX deploy default: False = raw head output; decode + NMS stay
+# in the runtime (matches external/YOLOX/demo/ONNXRuntime/onnx_inference.py).
+# True bakes box decoding into the graph.
+YOLOX_ONNX_DECODE_IN_INFERENCE = False
+YOLOX_ONNX_SIMPLIFY = True  # run onnx-simplifier after export (falls back to the raw graph if simplify fails)
 
 NANODET_INFER_VIDEO_PATH = INPUT_PATH
 NANODET_INFER_CHECKPOINT = os.path.join(NANODET_OUTPUT_DIR, "nanodet_final.pth")

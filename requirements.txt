@@ -16,6 +16,9 @@ Cython
 imagesize
 pytorch-lightning
 mmengine  # pure-Python only, needed to unpickle official RTMDet .pth checkpoint metadata
+onnx>=1.13.0
+onnxsim
+onnxruntime
 
 # Install with:
 #   "C:\Users\QBS PC\PycharmProjects\ais-handler-template\.venv\Scripts\python.exe" -m pip install -r requirements.txt
